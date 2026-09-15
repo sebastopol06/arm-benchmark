@@ -1,21 +1,17 @@
-#include <cstddef>
+#include "common.h"
 
-struct Complex {
-    float re;
-    float im;
-};
+#include <cstddef>
 
 // 4-Rx Maximum Ratio Combining
 //
-// out[k] = sum(a=0..3) conj(h[a][k]) * rx[a][k]
+// out[k] = sum_a conj(h[a][k]) * rx[a][k]
 //
-// conj(h) * r:
-//   (hr - j*hi) * (rr + j*ri)
-//   real = hr*rr + hi*ri
-//   imag = hr*ri - hi*rr
+// (a - jb)(c + jd)
+//   real = ac + bd
+//   imag = ad - bc
 //
 void mrc4_scalar(
-    const Complex* __restrict rx0,
+    const Complex* __restrict rx0, // No aliasing between rx0, rx1, rx2, rx3, h0, h1, h2, h3, and out to protect data
     const Complex* __restrict rx1,
     const Complex* __restrict rx2,
     const Complex* __restrict rx3,
