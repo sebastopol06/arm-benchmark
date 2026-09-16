@@ -22,13 +22,14 @@ For benchmarking purpose, consider LLVM-MCA after isolation of the relevant piec
 ## Kernel
 
 For each complex input sample:
+
 $$
 y[k] = \sum_{a=0}^{3} \mathrm{conj}(h_a[k]) \cdot r_a[k]
 $$
 
 This is typical usecase for LTE-A MIMO receiver. This operation is performed for each RE, that could be (20MHz, FDD Transmission Scheme), 14 OFDM symbols, 1200 subcarriers per subframe (1ms), thus 16,800 MRC per ms, ~17e6 MRC per second. Definitely a candidate for massively repeated execution on a DSP.
 
-## Methodology
+## Methodology and Increments
 
 To make LLVM-MCA results comparable, each benchmark processes exactly 4 complex output samples.
 
@@ -42,19 +43,77 @@ asm volatile("# LLVM-MCA-BEGIN mrc4_block");
 asm volatile("# LLVM-MCA-END mrc4_block");
 ```
 
-Two initial builds are compared:
+Consider for reference the build arguments:
 
 Naive Implementation aka Scalar
 ```text
--O3 -std=c++17 -mcpu=neoverse-v2 -fno-vectorize -fno-slp-vectorize 
+-O3 -std=c++17 -mcpu=neoverse-v2 -fno-vectorize -fno-slp-vectorize
+
 ```
 
 SIMD (automatically enabled by compiler)
 ```text
 -O3 -std=c++17 -mcpu=neoverse-v2
+
 ```
 
+Explicit NEON
+```text
+-O3 -std=c++17 -mcpu=neoverse-v2
+
+```
+
+SVE
+```text
+-O3 -std=c++17 -mcpu=neoverse-v2 -msve-vector-bits=128
+
+```
+
+SVE (FCMLA)
+```text
+-O3 -std=c++17 -mcpu=neoverse-v2 -msve-vector-bits=128
+
+```
+
+SME
+```text
+-O3 -std=c++17 -mcpu=neoverse-v2+sme
+
+```
+
+Special case for LLVM-MCA arguments:
+SME
+```text
+-mcpu=neoverse-v2 -mattr=+sme -timeline
+
+```
+
+### SIMD in a Nutshell
+
 A first attempt was made leaving the complete variable-size MRC loop. However, the compiler-generated code contained both a vectorized main loop and a scalar remainder loop. Then LLVM-MCA analyzed both paths as part of the same code region. This made direct comparison misleading: the reported instruction count, total cycles and block throughput did not represent the same amount of useful work between the scalar and SIMD implementations. The benchmark was therefore reduced to a fixed block of 4 complex samples to match the width of a 128-bit NEON vector (`4 × float32`).
+
+### NEON in a Nutshell
+
+NEON is a fixed-width SIMD architecture. In AArch64, a 128-bit NEON vector can process 4 `float32` values in parallel.
+
+In this benchmark, explicit NEON vectorizes the MRC arithmetic and uses structured loads and stores (`LD2`/`ST2`) to efficiently handle the interleaved real/imaginary complex representation.
+
+### SVE in a Nutshell
+
+FMA (Fused Multiply-Add) computes a multiplication and an addition as a single operation: $a = a + b \times c$. It reduces the number of instructions and performs only one floating-point rounding for the combined operation.
+
+FCMLA (Floating-point Complex Multiply-Add) performs a multiply-accumulate directly on complex values represented as interleaved real and imaginary components: $a = a + b \times c$, where `a`, `b` and `c` contain complex values.
+
+SVE extends SIMD with a vector-length-agnostic programming model and predicated execution. The first SVE implementation (v4) separates real and imaginary components using gather/scatter operations. This demonstrates that using a more capable SIMD ISA does not automatically produce a better implementation when the data layout is poorly matched to the instructions.
+
+V4.1 uses FCMLA to keep the complex samples in their native representation, avoiding the gather/scatter decomposition of v4. The improvement therefore comes from a better mapping of the algorithm onto the ISA, rather than from using wider vectors: SVE is restricted to 128 bits in this comparison.
+
+### SME in a Nutshell
+
+SMEextends SVE with streaming execution and matrix-oriented facilities such as the ZA array.
+
+MRC is basically a complex vector operation and does not naturally map onto SME's matrix outer-product operations. v5 therefore evaluates the complex FCMLA implementation in SME streaming mode rather than forcing the
+algorithm into a matrix representation.
 
 ## Top-level Results
 
@@ -63,7 +122,7 @@ Performance outcome
 |---|---:|---:|---:|---:|---:|---:|
 | Instructions / MCA region | 134 | 75 | 26 | 45 | 29 | 37 |
 | µOps / MCA region | 170 | 93 | 55 | 123 | 47 | 39 |
-| Block RThroughput | 28.3 cycles | 16.0 cycles | 9.2 cycles | 20.5 cycles | 7.8 cycles | 6.5 cycles |
+| Block RThroughput (cycles) | 28.3 | 16.0 | 9.2 | 20.5 | 7.8 | 6.5 |
 | Cycles / sample | 7.08 | 4.00 | 2.30 | 5.13 | 1.95 | N/A* |
 | Speedup vs Scalar | 1.00× | 1.77× | 3.08× | 1.38× | 3.63× | N/A* |
 
@@ -73,10 +132,6 @@ The reported 6.5-cycle Block RThroughput is therefore retained as a raw LLVM-MCA
 
 TODO: Provide script for PUE, ED, based on log
 
-### Top-Level Observation / Discussion
-SME does not help
-
-TBD
 
 ## Going More into the Details (Inside the Pipeline)
 
@@ -99,7 +154,7 @@ Pipeline outcome
 | `-` | 482 | 225 | 45 | 107 | 65 | 109 |
 | `= / (= + e)` | 53.3% | 68.3% | 58.3% | 40.6% | 53.2% | 53.0% |
 
-### Pipeline comparison: Scalar (v1) vs Auto-SIMD (v2)
+### Sparse yet Detailed Pipeline Comparison: Scalar (v1) vs Auto-SIMD (v2)
 
 Interestingly, the auto-vectorized implementation is much faster overall, but shows a higher proportion of pre-execution waiting. That suggests some optimization question.
 
@@ -160,15 +215,88 @@ The auto-vectorized implementation performs substantially more useful work per i
 
 The final accumulation and store are still constrained by preceding results.
 
-#### 5. TBD
+### Sparse yet Detailed Pipeline Comparison: Auto-SIMD (v2) vs NEON (v3)
+#### 1. Data rearrangement overhead
 
-TBD
+```asm
+D======eeE----------R     trn2  v1.4s, v17.4s, v17.4s
+D=========eeE-------R     trn2  v3.4s, v21.4s, v3.4s
+D===========eeeE----R     fmul  v1.4s, v1.4s, v3.4s
+D=====eeE----------R      trn1  v3.4s, v17.4s, v17.4s
+D===========eeeeE--R      fmla  v1.4s, v21.4s, v3.4s
+D=================eeER    fadd  v0.4s, v0.4s, v1.4s
+D====================eeER stp   q2, q0, [x8]
+```
 
-### Scalar to SME
+The compiler successfully vectorizes the computation, but the interleaved complex layout requires several `TRN1` / `TRN2` operations to rearrange real and imaginary components.
 
-#### 1. Architecture outcome
+These additional instructions consume pipeline resources and introduce dependencies before the useful multiply-accumulate operations.
 
-| | v1 Scalar | v2 Auto-SIMD | v3 NEON | v4 SVE | v4.1 SVE FCMLA | v5 SME* |
+V3 addresses this explicitly with NEON structured loads and stores (`LD2` / `ST2`), moving the real/imaginary separation to the memory access itself rather than performing it through explicit shuffle instructions.
+
+### Sparse yet Detailed Pipeline Comparison: NEON (v3) vs SVE (v4, v4.1)
+#### 1. Scatter Overhead in v4
+
+A representative sequence in v4:
+
+```asm
+DeeeeeeeeeE-------R    ld1w  { z5.s }, p0/z, [x12, z0.s, uxtw]
+DeE---------------R    add   x12, x12, #4
+D==eeeeeeeeeE----R     ld1w  { z6.s }, p0/z, [x12, z0.s, uxtw]
+DeE--------------R     add   x12, x2, x9
+D=eeeeeeeeeE----R      ld1w  { z7.s }, p0/z, [x12, z0.s, uxtw]
+DeE-------------R      add   x12, x12, #4
+D====eeeeeeeeeER       ld1w  { z16.s }, p0/z, [x12, z0.s, uxtw]
+```
+
+The naive SVE implementation separates real and imaginary components through gather/scatter memory operations.
+
+The long execution periods are clearly visible in the pipeline. In the Neoverse V2 model, each gather load expands to 5 µOps with a latency of 9 cycles, making memory rearrangement substantially more expensive than
+the structured `LD2` / `ST2` approach used by v3. This contributes to v4 regressing compared to NEON.
+
+#### 2. Complex-Aware Arithmetic in v4.1
+
+```asm
+ldp    q0, q1, [x0]
+ldp    q2, q3, [x4]
+fcmla  z4.s, p0/m, z3.s, z1.s, #0
+fcmla  z5.s, p0/m, z2.s, z0.s, #0
+fcmla  z4.s, p0/m, z3.s, z1.s, #270
+fcmla  z5.s, p0/m, z2.s, z0.s, #270
+```
+
+Instead of separating real and imaginary components, V4.1 keeps complex samples in their native interleaved representation and operates directly on them using pairs of `FCMLA` instructions.
+
+The gather/scatter decomposition disappears, while two independent accumulators expose additional instruction-level parallelism.
+
+With SVE still restricted to 128 bits, Block RThroughput drops. The improvement therefore comes from a better mapping of the algorithm onto the ISA, not actually from wider vectors.
+
+### Sparse yet Detailed Pipeline Comparison: NEON (v3) vs SME (v5)
+#### 1. Vector Arithmetic remains the Limiting Structure
+
+A representative sequence in v5:
+
+```asm
+DeeeeeeER              ldr    z0, [x0]
+DeeeeeeER              ldr    z1, [x4]
+D=eeeeeeER             ld1w   { z2.s }, p0/z, [...]
+D=eeeeeeER             ld1w   { z3.s }, p0/z, [...]
+...
+D=====eeeeeE...         fcmla  z5.s, p0/m, z1.s, z0.s, #0
+D=====eeeeeE...         fcmla  z4.s, p0/m, z3.s, z2.s, #0
+D==========eeeeeE...    fcmla  z5.s, p0/m, z1.s, z0.s, #270
+D==========eeeeeE...    fcmla  z4.s, p0/m, z3.s, z2.s, #270
+```
+
+SME enables streaming execution, but the MRC kernel remains fundamentally a complex vector operation. The generated code therefore still consists primarily of vector loads followed by `FCMLA` dependency chains.
+
+No ZA matrix or outer-product operation naturally emerges from the algorithm. Unlike the transition from v4 to v4.1, SME therefore does not expose a new algorithmic optimization for this kernel.
+
+The raw modeled looks good, but it is not directly work-normalized against v3 because the SME Streaming Vector Length is not fixed to the same 128-bit workload. The Neoverse V2 + SME configuration is also hypothetical.
+
+## Architecture outcome
+
+| | v1 Scalar | v2 Auto-SIMD | v3 NEON | v4 SVE Auto-FMA | v4.1 SVE FCMLA | v5 SME* |
 |---|---|---|---|---|---|---|
 | Data parallelism | 1 × FP32 | 4 × FP32 | 4 × FP32 | 4 × FP32 SVE | SVE complex pairs | Streaming SVE complex pairs |
 | Arithmetic | Scalar FP | Vector FP | NEON FMA | SVE FMA | SVE `FCMLA` | Streaming `FCMLA` |
@@ -181,7 +309,7 @@ TBD
 
 \* SME is modeled by enabling SME on the Neoverse V2 LLVM-MCA scheduling model. Since Neoverse V2 does not implement SME, then v5 is a tentative ISA modeling experiment. Direct comparison in the benchmark is slightly speculative.
 
-#### 2. Milestones
+## Top-Level Outcomes based on the Benchmark
 
 v1:   many scalar operations and dependency chains.
 
