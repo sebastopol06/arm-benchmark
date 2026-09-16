@@ -92,7 +92,7 @@ FCMLA (Floating-point Complex Multiply-Add) performs a multiply-accumulate direc
 
 SVE extends SIMD with a vector-length-agnostic programming model and predicated execution. The first SVE implementation (v4) separates real and imaginary components using gather/scatter operations. This demonstrates that using a more capable SIMD ISA does not automatically produce a better implementation when the data layout is poorly matched to the instructions.
 
-V4.1 uses FCMLA to keep the complex samples in their native representation, avoiding the gather/scatter decomposition of v4. The improvement therefore comes from a better mapping of the algorithm onto the ISA, rather than from using wider vectors: SVE is restricted to 128 bits in this comparison.
+v4.1 uses FCMLA to keep the complex samples in their native representation, avoiding the gather/scatter decomposition of v4. The improvement therefore comes from a better mapping of the algorithm onto the ISA, rather than from using wider vectors: SVE is restricted to 128 bits in this comparison.
 
 ### SME in a Nutshell
 
@@ -106,9 +106,9 @@ algorithm into a matrix representation.
 Performance outcome
 | Metric | v1 Scalar | v2 Auto-SIMD | v3 NEON | v4 SVE | v4.1 SVE FCMLA | v5 SME* |
 |---|---:|---:|---:|---:|---:|---:|
-| Instructions | 134 | 75 | 26 | 45 | 29 | 37 |
-| Block Throughput (cycles) | 28.3 | 16.0 | 9.2 | 20.5 | 7.8 | 6.5 |
-| Speedup vs Scalar | 1.00x | 1.77x | 3.08x | 1.38x | 3.63x | 4.35x |
+| Instructions | 134 | 75 | 26 | 45 | 29 | 37* |
+| Block Throughput (cycles) | 28.3 | 16.0 | 9.2 | 20.5 | 7.8 | 6.5* |
+| Speedup vs Scalar | 1.00x | 1.77x | 3.08x | 1.38x | 3.63x | 4.35x* |
 
 \* v5 uses a hypothetical Neoverse V2 + SME LLVM-MCA configuration.
 The Streaming Vector Length is not established as 128 bits by this experiment, so the MCA region cannot be normalized to exactly four complex samples.
@@ -161,12 +161,12 @@ The metrics are produced by `metrics.py` and fed by the logs.
 Pipeline outcome
 | Metric | v1 Scalar | v2 Auto-SIMD | v3 NEON | v4 SVE | v4.1 SVE FCMLA | v5 SME* |
 |---|---:|---:|---:|---:|---:|---:|
-| [1] Scheduler wait | 5.1 | 9.3 | 9.6 | 6.6 | 6.3 | 6.7 |
-| [2] Ready/resource wait | 0.5 | 1.6 | 0.6 | 1.6 | 0.3 | 0.6 |
-| [3] WB → Retire | 4.4 | 6.2 | 5.5 | 5.1 | 6.2 | 8.1 |
-| Cycles/sample | 7.08 | 4.00 | 2.30 | 5.12 | 1.95 | 1.62 |
-| PUE | 0.6 | 0.7 | 0.8 | 0.7 | 0.8 | 0.8 |
-| ED | 3.09 | 2.18 | 1.59 | 0.69 | 1.77 | 3.69 |
+| [1] Scheduler wait | 5.1 | 9.3 | 9.6 | 6.6 | 6.3 | 6.7* |
+| [2] Ready/resource wait | 0.5 | 1.6 | 0.6 | 1.6 | 0.3 | 0.6* |
+| [3] WB → Retire | 4.4 | 6.2 | 5.5 | 5.1 | 6.2 | 8.1* |
+| Cycles/sample | 7.08 | 4.00 | 2.30 | 5.12 | 1.95 | 1.62* |
+| PUE | 0.6 | 0.7 | 0.8 | 0.7 | 0.8 | 0.8* |
+| ED | 3.09 | 2.18 | 1.59 | 0.69 | 1.77 | 3.69* |
 
 Find a top-level evidence of the extensions benefit. PUE states the pipeline efficiency, cycles/sample whether it translates to actual throughput.
 
@@ -192,79 +192,78 @@ Interestingly, the auto-vectorized implementation is much faster overall, but sh
 
 Highlight some LLVM-MCA timeline for discussion.
 
-#### 1. Loads: same latency, more data
+#### 1. Loads: Same Latency, More Data
 
+Scalar
 ```asm
-Scalar                           Auto-SIMD
-
-DeeeeeeER  ldp s1, s2, [x0]      DeeeeeeER  ldp q3, q4, [x0]
+DeeeeeeE-----------R  ldp s1, s2, [x0]
 ```
 
-Yet same execution latency (6 cycles), v2 deals with 128-bit vector registers and therefore moves more data per instruction. Thus increase in parallelism with no significant penalty in instruction latency.
+Auto-SIMD
+```asm
+DeeeeeeE---------------R  ldp q3, q4, [x0]
+```
 
-#### 2. Scalar dependency chains
+Yet same execution latency (6 cycles), v2 deals has some retirement penalty but deals with 128-bit vector registers, that is 4x more data per instruction. There is an increase in parallelism with no significant penalty in instruction latency.
+
+#### 2. Scalar Dependencies
 
 Typical sequence v1:
 
 ```asm
-D====eeeE...       fmul   s25, s2, s18
-D======eeeeE...    fmadd  s25, s17, s1, s25
-...
-D========eeE...    fadd   s25, s25, s0
-D==========eeE...  fadd   s2, s25, s2
+D====eeeE-------R  fmul  s25, s2, s18
+D======eeeeE----R  fmadd s25, s17, s1, s25
+D======eeeE-----R  fnmul s1, s1, s18
+D=======eeeeE---R  fmadd s1, s17, s2, s1
+ D====eeeE------R  fnmul s2, s3, s20
+ D=====eeeeE----R  fmadd s2, s19, s4, s2
+ D=========eeE--R  fadd  s25, s25, s0
+ D==========eeE-R  fadd  s0, s1, s0
 ```
 
-`=` cycles increases and shows instructions being dispatched but waiting before execution. Successive MAC and ADD operations introduce dependency and clip parallelism.
+`=` cycles increase along the sequence and show the instructions getting properly dispatched but stuck waiting for execution. Successive MAC and ADD operations introduce dependencies, which clip parallel processing.
 
 #### 3. SIMD computation introduces data rearrangement
 
-v2 processes 4 `FLP32` with 1 instruction, 4 bytes each so 16 bytes (128 bits):
+v2 processes 4 `FP32` within 1 instruction, 4 bytes each so 16 bytes (128 bits):
 
 ```asm
-D=====eeE...          trn2  v2.4s, v0.4s, v0.4s
-D======eeE...         trn1  v0.4s, v0.4s, v0.4s
+D=====eeE------------R  trn2  v2.4s, v0.4s, v0.4s
+D======eeE-----------R  trn1  v0.4s, v0.4s, v0.4s
 ...
-D===========eeeE...   fmul  v1.4s, ...
-D===========eeeeE...  fmla  v1.4s, ...
+   D========eeeE-----R  fmul  v2.4s, v2.4s, v5.4s
+   D=========eeeeE---R  fmla  v2.4s, v3.4s, v0.4s
 ```
 
-The `.4s` vector operations perform 4 FLP operations in a single operation (parallel), excellent. But see `trn2` / `trn1` that rearrange the interleaved real and imaginary components, this is a penalty induced by SIMD when dealing with `struct Complex { float re;  float im; };`. In memory the array of data is then interleaved `re0 im0 | re1 im1 | ...` and the compiler thinks it is mandatory de-interleave. Well, this could be handled differently to save this cost by preparing the data with proper layout or considering `re` and `im` are independent so their order does not matter. This later aspect is a special case and does not scale up.
+The `.4s` vector operations perform 4 FP operations in a single operation (parallel), excellent. But see `trn1` / `trn2` that rearrange the interleaved real and imaginary components, this is a penalty prequisite enabled by SIMD when dealing with `struct Complex { float re;  float im; };`. In memory, the array of data is then interleaved `re0 im0 | re1 im1 | ...` and the compiler thinks it is mandatory to de-interleave. Well, this could be handled differently to save this cost by preparing the data with proper layout or considering `re` and `im` are independent so their order does not matter. This later aspect is a special case and does not scale up.
 
-#### 4. SIMD does not eliminate dependency chains
+#### 4. SIMD Keeps Some Dependencies
 
-Towards the end of V2:
+Remaining limitation in v2.
 
 ```asm
-D============eeeeE-R     fmla  v1.4s, ...
-D================eeER    fadd  v0.4s, v0.4s, v1.4s
-...
-D===========eeeeE--R     fmla  v1.4s, ...
-D=================eeER   fadd  v0.4s, v0.4s, v1.4s
-D====================eeER stp  q2, q0, [x8]
+D===========eeeE-----R      fmul  v1.4s, v1.4s, v3.4s
+ D===========eeeeE---R      fmla  v1.4s, v21.4s, v3.4s
+ D==================eeER.   fadd  v0.4s, v0.4s, v1.4s
+ D====================eeER  stp   q2, q0, [x8]
 ```
 
-The auto-vectorized implementation performs substantially more useful work per instruction, but long pre-execution waits remain visible.
-
-The final accumulation and store are still constrained by preceding results.
+The SIMD implementation performs data processing per instruction, but long pre-execution waits remain visible. This is visible in the final accumulation and store are still stuck, waiting for preceding results to be finished.
 
 ### Sparse yet Detailed Pipeline Comparison: Auto-SIMD (v2) vs NEON (v3)
-#### 1. Data rearrangement overhead
+#### 1. Data Rearrangement Overhead
+
+Still the SIMD requires a preprocessing overhead.
 
 ```asm
-D======eeE----------R     trn2  v1.4s, v17.4s, v17.4s
-D=========eeE-------R     trn2  v3.4s, v21.4s, v3.4s
-D===========eeeE----R     fmul  v1.4s, v1.4s, v3.4s
-D=====eeE----------R      trn1  v3.4s, v17.4s, v17.4s
-D===========eeeeE--R      fmla  v1.4s, v21.4s, v3.4s
-D=================eeER    fadd  v0.4s, v0.4s, v1.4s
-D====================eeER stp   q2, q0, [x8]
+DeeeeeeeeER                        ld2   { v0.4s, v1.4s }, [x0]
+ DeeeeeeeeER                       ld2   { v16.4s, v17.4s }, [x4]
+ D========eeeER                    fmul  v24.4s, v0.4s, v16.4s
+ D=========eeeeER                  fmla  v24.4s, v1.4s, v17.4s
+         D=================eeeeER  st2   { v24.4s, v25.4s }, [x8]
 ```
 
-The compiler successfully vectorizes the computation, but the interleaved complex layout requires several `TRN1` / `TRN2` operations to rearrange real and imaginary components.
-
-These additional instructions consume pipeline resources and introduce dependencies before the useful multiply-accumulate operations.
-
-V3 addresses this explicitly with NEON structured loads and stores (`LD2` / `ST2`), moving the real/imaginary separation to the memory access itself rather than performing it through explicit shuffle instructions.
+The interleaved complex layout is now replaced with NEON structured loads and stores, moving the real/imaginary separation directly to the memory access itself (no more intermediate step).
 
 ### Sparse yet Detailed Pipeline Comparison: NEON (v3) vs SVE (v4, v4.1)
 #### 1. Scatter Overhead in v4
@@ -272,36 +271,28 @@ V3 addresses this explicitly with NEON structured loads and stores (`LD2` / `ST2
 A representative sequence in v4:
 
 ```asm
-DeeeeeeeeeE-------R    ld1w  { z5.s }, p0/z, [x12, z0.s, uxtw]
-DeE---------------R    add   x12, x12, #4
-D==eeeeeeeeeE----R     ld1w  { z6.s }, p0/z, [x12, z0.s, uxtw]
-DeE--------------R     add   x12, x2, x9
-D=eeeeeeeeeE----R      ld1w  { z7.s }, p0/z, [x12, z0.s, uxtw]
-DeE-------------R      add   x12, x12, #4
-D====eeeeeeeeeER       ld1w  { z16.s }, p0/z, [x12, z0.s, uxtw]
+D==eeeeeeeeeER         ld1w  { z2.s }, p0/z, [x2, z0.s, uxtw]
+ D===eeeeeeeeeER       ld1w  { z3.s }, p0/z, [x8, z0.s, uxtw]
+ DeE-----------R       add   x8, x6, #4
+  D=====eeeeeeeeeER    ld1w  { z4.s }, p0/z, [x6, z0.s, uxtw]
+   D======eeeeeeeeeER  ld1w  { z5.s }, p0/z, [x8, z0.s, uxtw]
 ```
 
-The naive SVE implementation separates real and imaginary components through gather/scatter memory operations.
-
-The long execution periods are clearly visible in the pipeline. In the Neoverse V2 model, each gather load expands to 5 µOps with a latency of 9 cycles, making memory rearrangement substantially more expensive than
-the structured `LD2` / `ST2` approach used by v3. This contributes to v4 regressing compared to NEON.
+The naive SVE in v4 implementation separates real and imaginary components through gather load operations, e.g. `z_re = [ re0 re1 re2 re3 ]`. This is required since the memory is non-continous due to our poor Complex design that does not fit well to an array representation on top. The memory rearrangement is actually more expensive than
+the `ld2` / `st2` approach used by v3. This dramatically contributes to v4 regressing compared to NEON but is not really an SVE responsibility.
 
 #### 2. Complex-Aware Arithmetic in v4.1
 
 ```asm
-ldp    q0, q1, [x0]
-ldp    q2, q3, [x4]
-fcmla  z4.s, p0/m, z3.s, z1.s, #0
-fcmla  z5.s, p0/m, z2.s, z0.s, #0
-fcmla  z4.s, p0/m, z3.s, z1.s, #270
-fcmla  z5.s, p0/m, z2.s, z0.s, #270
+D=====eeeeeE-------R  fcmla z5.s, p0/m, z2.s, z0.s, #0
+D=====eeeeeE-------R  fcmla z4.s, p0/m, z3.s, z1.s, #270
+D=======eeeeeE-----R  fcmla z5.s, p0/m, z2.s, z0.s, #270
+ D======eeeeeE-----R  fcmla z4.s, p0/m, z3.s, z1.s, #0
 ```
 
-Instead of separating real and imaginary components, V4.1 keeps complex samples in their native interleaved representation and operates directly on them using pairs of `FCMLA` instructions.
+Instead of separating real and imaginary components, v4.1 keeps Complex samples in their native interleaved representation and operates directly on them using pairs of `fcmla` instructions. So the gather load penalty disappears, and even better two independent accumulators expose additional instruction-level parallelism.
 
-The gather/scatter decomposition disappears, while two independent accumulators expose additional instruction-level parallelism.
-
-With SVE still restricted to 128 bits, Block RThroughput drops. The improvement therefore comes from a better mapping of the algorithm onto the ISA, not actually from wider vectors.
+With SVE still restricted to 128 bits, the block throughput eventually drops. The overall improvement actually comes from a better mapping of the algorithm onto the ISA, on top of wider vectors.
 
 ### Sparse yet Detailed Pipeline Comparison: NEON (v3) vs SME (v5)
 #### 1. Vector Arithmetic remains the Limiting Structure
@@ -309,37 +300,38 @@ With SVE still restricted to 128 bits, Block RThroughput drops. The improvement 
 A representative sequence in v5:
 
 ```asm
-DeeeeeeER              ldr    z0, [x0]
-DeeeeeeER              ldr    z1, [x4]
-D=eeeeeeER             ld1w   { z2.s }, p0/z, [...]
-D=eeeeeeER             ld1w   { z3.s }, p0/z, [...]
-...
-D=====eeeeeE...         fcmla  z5.s, p0/m, z1.s, z0.s, #0
-D=====eeeeeE...         fcmla  z4.s, p0/m, z3.s, z2.s, #0
-D==========eeeeeE...    fcmla  z5.s, p0/m, z1.s, z0.s, #270
-D==========eeeeeE...    fcmla  z4.s, p0/m, z3.s, z2.s, #270
+DeeeeeeE----------------R  ldr   z0, [x0]
+ DeeeeeeE---------------R  ldr   z1, [x4]
+ D=eeE------------------R  mov   z4.s, #0
+ DeeeeE-----------------R  ldr   x8, [sp, #2144]
+ D=eeeeeeE--------------R  ld1w  { z2.s }, p0/z, [x0, x9, lsl #2]
+ D=eeeeeeE--------------R  ld1w  { z3.s }, p0/z, [x4, x9, lsl #2]
+ D===eeE----------------R  mov   z5.d, z4.d
+  D=====eeeeeE----------R  fcmla z5.s, p0/m, z1.s, z0.s, #0
+  D======eeeeeE---------R  fcmla z4.s, p0/m, z3.s, z2.s, #0
+  D=======eeeeeE--------R  fcmla z5.s, p0/m, z1.s, z0.s, #270
+  DeeeeeeE--------------R  ldr   z0, [x1]
+  D=eeeeeeE-------------R  ldr   z1, [x5]
+  D========eeeeeE-------R  fcmla z4.s, p0/m, z3.s, z2.s, #270
 ```
+Qualitative comment, the pipeline is now in a reasonable shape, with pretty good density and fewer instructions stuck on dependencies.
 
-SME enables streaming execution, but the MRC kernel remains fundamentally a complex vector operation. The generated code therefore still consists primarily of vector loads followed by `FCMLA` dependency chains.
-
-No ZA matrix or outer-product operation naturally emerges from the algorithm. Unlike the transition from v4 to v4.1, SME therefore does not expose a new algorithmic optimization for this kernel.
-
-The raw modeled looks good, but it is not directly work-normalized against v3 because the SME Streaming Vector Length is not fixed to the same 128-bit workload. The Neoverse V2 + SME configuration is also hypothetical.
+Now the SME enables streaming execution, but we should ackowledge that our kernel remains fundamentally a complex vector operation. The generated code therefore still consists primarily of vector loads followed by `fcmla` dependency chains. There is no ZA matrix nor outer-product operation that naturally emerges from the kernel and the full SME capability cannot be reached in the same way as with SVE.
 
 ## Architecture outcome
 
-| | v1 Scalar | v2 Auto-SIMD | v3 NEON | v4 SVE Auto-FMA | v4.1 SVE FCMLA | v5 SME* |
+| | v1 Scalar | v2 Auto-SIMD | v3 NEON | v4 SVE | v4.1 SVE FCMLA | v5 SME* |
 |---|---|---|---|---|---|---|
 | Data parallelism | 1 x FP32 | 4 x FP32 | 4 x FP32 | 4 x FP32 SVE | SVE complex pairs | Streaming SVE complex pairs |
-| Arithmetic | Scalar FP | Vector FP | NEON FMA | SVE FMA | SVE `FCMLA` | Streaming `FCMLA` |
-| Data access | Scalar loads | Vector loads | `ld2` / `st2` | Gather / scatter | Contiguous vector loads | Streaming vector loads |
-| Data rearrangement | Minimal | `trn1` / `trn2` | Structured load/store | Gather / scatter | Native interleaved complex representation | Native interleaved complex representation |
-| Main limitation | Scalar execution | Shuffle overhead | FMA dependency chains | Gather/scatter overhead | FCMLA dependency chains | Model / SVL comparability |
+| Arithmetic | Scalar FP | SIMD | NEON | SVE | SVE FCMLA | Streaming SME FCMLA |
+| Data access | Scalar loads/stores | Vector loads/stores | Structured `ld2` / `st2` | Gather / scatter | Contiguous vector loads/stores | Streaming vector loads/stores |
+| Data rearrangement | Minimal | `trn1` / `trn2` | Load/store deinterleaving | Gather deinterleaving | Direct interleaved complex | Direct interleaved complex |
+| Main limitation | Scalar execution | Shuffle overhead | Low density pipeline | Gather overhead | FCMLA dependencies | FCMLA dependencies / model comparability |
 | Block RThroughput | 28.3 | 16.0 | 9.2 | 20.5 | 7.8 | 6.5* |
 | Cycles / sample | 7.08 | 4.00 | 2.30 | 5.13 | 1.95 | 1.63* |
 | Relative speedup | 1.00x | 1.77x | 3.08x | 1.38x | 3.63x | 4.35x* |
 
-\* SME is modeled by enabling SME on the Neoverse V2 LLVM-MCA scheduling model. Since Neoverse V2 does not implement SME, then v5 is a tentative ISA modeling experiment. Direct comparison in the benchmark is slightly speculative.
+\* SME extension is enabled by loading SME on the Neoverse V2 LLVM-MCA scheduling model. Since Neoverse V2 does not implement SME, then v5 is a tentative experiment in the ISS load. Then direct comparison in the benchmark is slightly speculative.
 
 ## Top-Level Outcomes based on the Benchmark
 
@@ -351,6 +343,6 @@ v3:   explicit NEON removes data rearrangement overhead. Some dependencies remai
 
 v4:   SVE vectorization, but gather/scatter overhead makes the naive mapping inefficient.
 
-v4.1: complex-aware SVE with FCMLA removes gather/scatter overhead and reduces dependency pressure.
+v4.1: complex-aware SVE with FCMLA removes gather overhead and reduces dependency pressure.
 
 v5:   SME streaming further reduces modeled throughput, but the result is not directly comparable due to streaming vector length and the hypothetical V2+SME model.
