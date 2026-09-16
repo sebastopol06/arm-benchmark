@@ -1,6 +1,6 @@
 # ARM Pipeline Exploration on Toy Example
 
-Consider different ARM implementations of a **4-Rx Maximum Ratio Combining (MRC)** kernel map onto the CPU pipeline.
+Consider different ARM implementations of a 4-Rx Maximum Ratio Combining (MRC) on the CPU pipeline. Call it a kernel.
 
 Consider Neoverse V2, modern ARMv9 core.
 
@@ -30,7 +30,7 @@ This is typical usecase for LTE-A MIMO receiver. This operation is performed for
 
 ## Methodology
 
-To make LLVM-MCA results comparable, each benchmark processes exactly **4 complex output samples**.
+To make LLVM-MCA results comparable, each benchmark processes exactly 4 complex output samples.
 
 LLVM-MCA regions isolate the kernel:
 
@@ -58,14 +58,14 @@ A first attempt was made leaving the complete variable-size MRC loop. However, t
 
 ## Top-level Results
 
-| Metric | Scalar | Auto-SIMD | NEON | SVE | SME |
+| Metric | v1 Scalar | v2 Auto-SIMD | v3 NEON | v4 SVE | v5 SME |
 |---|---:|---:|---:|---:|---:|
-| Instructions / 4 samples | 134 | 75 | TBD | TBD | TBD |
-| µOps / 4 samples | 170 | 93 | TBD | TBD | TBD |
-| Block RThroughput | 28.3 cycles | 16.0 cycles | TBD | TBD | TBD |
-| Cycles / sample | 7.08 | 4.00 | TBD | TBD | TBD |
-| Speedup vs Scalar | 1.00× | 1.77× | TBD | TBD | TBD |
-| IPC | 4.59 | 4.48 | TBD | TBD | TBD |
+| Instructions / 4 samples | 134 | 75 | 26 | TBD | TBD |
+| µOps / 4 samples | 170 | 93 | 55 | TBD | TBD |
+| Block RThroughput | 28.3 cycles | 16.0 cycles | 9.2 cycles | TBD | TBD |
+| Cycles / sample | 7.08 | 4.00 | 2.30 | TBD | TBD |
+| Speedup vs Scalar | 1.00× | 1.77× | 3.08× | TBD | TBD |
+| IPC | 4.59 | 4.48 | 2.54 | TBD | TBD |
 | PUE | TBD | TBD | TBD | TBD | TBD |
 | ED | TBD | TBD | TBD | TBD | TBD |
 
@@ -77,24 +77,113 @@ TBD
 
 ## Going More into the Details (Inside the Pipeline)
 
-LLVM-MCA timeline helps in going beyond the above averaged metrics. See v*.log.
-
-| Timeline metric | Scalar | Auto-SIMD |
-|---|---:|---:|
-| Execution slots (`e`) | 492 | 206 |
-| Wait before execution (`=`) | 562 | 443 |
-| Wait after execution (`-`) | 482 | 225 |
-| Wait-before-execute ratio | 53.3% | 68.3% |
-
-LLVM-MCA timeline notation:
-
+LLVM-MCA timeline helps in going beyond the above averaged metrics. See v*.log and consider notations:
 ```text
-D  Dispatch
-=  Waiting before execution
-e  Executing
-E  Execution complete
--  Waiting for retirement
-R  Retired
+`D`  Dispatch
+`=`  Wait before Execution
+`e`  Execution Slot
+`E`  Execution Completion
+`-`  Wait before Retirement
+`R`  Retired
 ```
+Overview
+| Timeline metric | v1 Scalar | v2 Auto-SIMD | v3 NEON | v4 SVE | v5 SME |
+|---|---:|---:|---:|---:|---:|
+| `e` | 492 | 206 | 134 | TBD | TBD |
+| `=` | 562 | 443 | 187 | TBD | TBD |
+| `-` | 482 | 225 | 45 | TBD | TBD |
+| `=/e` | 53.3% | 68.3% | 58.3% | TBD | TBD |
+
+### Pipeline comparison: Scalar (v1) vs Auto-SIMD (v2)
 
 Interestingly, the auto-vectorized implementation is much faster overall, but shows a higher proportion of pre-execution waiting. That suggests some optimization question.
+
+Highlight some LLVM-MCA timeline for discussion.
+
+#### 1. Loads: same latency, more data
+
+```asm
+Scalar                           Auto-SIMD
+
+DeeeeeeER  ldp s1, s2, [x0]      DeeeeeeER  ldp q3, q4, [x0]
+```
+
+Yet same execution latency (6 cycles), v2 deals with 128-bit vector registers and therefore moves more data per instruction. Thus increase in parallelism with no significant penalty in instruction latency.
+
+#### 2. Scalar dependency chains
+
+Typical sequence v1:
+
+```asm
+D====eeeE...       fmul   s25, s2, s18
+D======eeeeE...    fmadd  s25, s17, s1, s25
+...
+D========eeE...    fadd   s25, s25, s0
+D==========eeE...  fadd   s2, s25, s2
+```
+
+`=` cycles increases and shows instructions being dispatched but waiting before execution. Successive MAC and ADD operations introduce dependency and clip parallelism.
+
+#### 3. SIMD computation introduces data rearrangement
+
+v2 processes 4 `FLP32` with 1 instruction, 4 bytes each so 16 bytes (128 bits):
+
+```asm
+D=====eeE...          trn2  v2.4s, v0.4s, v0.4s
+D======eeE...         trn1  v0.4s, v0.4s, v0.4s
+...
+D===========eeeE...   fmul  v1.4s, ...
+D===========eeeeE...  fmla  v1.4s, ...
+```
+
+The `.4s` vector operations perform 4 FLP operations in a single operation (parallel), excellent. But see `trn2` / `trn1` that rearrange the interleaved real and imaginary components, this is a penalty induced by SIMD when dealing with `struct Complex { float re;  float im; };`. In memory the array of data is then interleaved `re0 im0 | re1 im1 | ...` and the compiler thinks it is mandatory de-interleave. Well, this could be handled differently to save this cost by preparing the data with proper layout or considering `re` and `im` are independent so their order does not matter. This later aspect is a special case and does not scale up.
+
+#### 4. SIMD does not eliminate dependency chains
+
+Towards the end of V2:
+
+```asm
+D============eeeeE-R     fmla  v1.4s, ...
+D================eeER    fadd  v0.4s, v0.4s, v1.4s
+...
+D===========eeeeE--R     fmla  v1.4s, ...
+D=================eeER   fadd  v0.4s, v0.4s, v1.4s
+D====================eeER stp  q2, q0, [x8]
+```
+
+The auto-vectorized implementation performs substantially more useful work per instruction, but long pre-execution waits remain visible.
+
+The final accumulation and store are still constrained by preceding results.
+
+#### 5. TBD
+
+TBD
+
+### Scalar to SIMD to NEON to SVE to SME
+
+| | v1 Scalar | v2 Auto-SIMD | v3 NEON | v4 SVE | v5 SME |
+|---|---|---|
+| Data parallelism | 1 × `FLP32` | 4 × `FLP32` |
+| Arithmetic | Scalar FP | Vector FP |
+| Instruction count | 134 | 75 |
+| Data rearrangement | Minimal | `trn1` / `trn2` |
+| Dependency chains | Significant | Still visible |
+| Block RThroughput | 28.3 cycles | 16.0 cycles |
+| Cycles / sample | 7.08 | 4.00 |
+
+| | v1 Scalar | v2 Auto-SIMD | v3 NEON | v4 SVE | v5 SME |
+|---|---|---|---|---|---|
+| Data parallelism | 1 × `FLP32` | 4 × `FLP32` | 4 × `FLP32` | TBD | TBD |
+| Arithmetic | Scalar | Vector | NEON | TBD | TBD |
+| Instruction count | 134 | 75 | 26 | TBD | TBD |
+| Data rearrangement | Minimal | `trn1` / `trn2` | `ld2` / `st2` | TBD | TBD |
+| Dependency chains | Significant | Still visible | Still visible | TBD | TBD |
+| Block RThroughput | 28.3 cycles | 16.0 cycles | 9.2 cycles | TBD | TBD |
+| Cycles / sample | 7.08 | 4.00 | 2.30 | TBD | TBD |
+| Speedup vs Scalar | 1.00× | 1.77× | 3.08× | TBD | TBD |
+
+v1: many scalar operations and dependency chains.  
+v2: parallel computation and fewer instructions, but data rearrangement and remaining dependencies.
+v3: explicit NEON removes data rearrangement overhead. Some dependencies remain.
+v4: TBD
+v5: TBD

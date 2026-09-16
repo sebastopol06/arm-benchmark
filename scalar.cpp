@@ -1,6 +1,9 @@
-#include "common.h"
-
 #include <cstddef>
+
+struct Complex {
+    float re;
+    float im;
+};
 
 // 4-Rx Maximum Ratio Combining
 //
