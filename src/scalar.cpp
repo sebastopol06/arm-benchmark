@@ -15,15 +15,15 @@ struct Complex {
 //
 __attribute__((noinline))
 void mrc4_block_mca(
-    const Complex* __restrict rx0, // No aliasing between rx0, rx1, rx2, rx3, h0, h1, h2, h3, and out to protect data
-    const Complex* __restrict rx1,
-    const Complex* __restrict rx2,
-    const Complex* __restrict rx3,
-    const Complex* __restrict h0,
-    const Complex* __restrict h1,
-    const Complex* __restrict h2,
-    const Complex* __restrict h3,
-    Complex* __restrict out)
+    const Complex* rx0,
+    const Complex* rx1,
+    const Complex* rx2,
+    const Complex* rx3,
+    const Complex* h0,
+    const Complex* h1,
+    const Complex* h2,
+    const Complex* h3,
+    Complex* out)
 {
     // Isolate SIMD code
     asm volatile("# LLVM-MCA-BEGIN mrc4_block");

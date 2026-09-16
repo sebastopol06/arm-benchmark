@@ -1,3 +1,5 @@
+armv8-a clang 23.1.0
+-O3 -std=c++17 -mcpu=neoverse-v2
 
 [0] Code Region - mrc4_block
 

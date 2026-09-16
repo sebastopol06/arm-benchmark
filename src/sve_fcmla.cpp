@@ -7,15 +7,15 @@ struct Complex {
 
 __attribute__((noinline))
 void mrc4_sve_fcmla(
-    const Complex* __restrict rx0,
-    const Complex* __restrict rx1,
-    const Complex* __restrict rx2,
-    const Complex* __restrict rx3,
-    const Complex* __restrict h0,
-    const Complex* __restrict h1,
-    const Complex* __restrict h2,
-    const Complex* __restrict h3,
-    Complex* __restrict out)
+    const Complex* rx0,
+    const Complex* rx1,
+    const Complex* rx2,
+    const Complex* rx3,
+    const Complex* h0,
+    const Complex* h1,
+    const Complex* h2,
+    const Complex* h3,
+    Complex* out)
 {
     asm volatile("# LLVM-MCA-BEGIN mrc4_sve_fcmla");
 

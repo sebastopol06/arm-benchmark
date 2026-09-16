@@ -7,20 +7,20 @@ struct Complex {
 
 __attribute__((noinline))
 void mrc4_neon(
-    const Complex* __restrict rx0,
-    const Complex* __restrict rx1,
-    const Complex* __restrict rx2,
-    const Complex* __restrict rx3,
-    const Complex* __restrict h0,
-    const Complex* __restrict h1,
-    const Complex* __restrict h2,
-    const Complex* __restrict h3,
-    Complex* __restrict out)
+    const Complex* rx0,
+    const Complex* rx1,
+    const Complex* rx2,
+    const Complex* rx3,
+    const Complex* h0,
+    const Complex* h1,
+    const Complex* h2,
+    const Complex* h3,
+    Complex* out)
 {
     asm volatile("# LLVM-MCA-BEGIN mrc4_neon");
 
     // Load 4 complex samples from each antenna.
-    // vld2q de-interleaves AoS {re,im} directly into:
+    // vld2q de-interleaves array of structure {re,im} directly into:
     //   val[0] = {re0,re1,re2,re3}
     //   val[1] = {im0,im1,im2,im3}
     const float32x4x2_t r0 = vld2q_f32(reinterpret_cast<const float*>(rx0));
@@ -58,7 +58,7 @@ void mrc4_neon(
     acc_im = vfmaq_f32(acc_im, c3.val[0], r3.val[1]);
     acc_im = vfmsq_f32(acc_im, c3.val[1], r3.val[0]);
 
-    // Re-interleave {re,im} for Complex AoS output.
+    // Re-interleave {re,im} for Complex array of structure output.
     float32x4x2_t result;
     result.val[0] = acc_re;
     result.val[1] = acc_im;

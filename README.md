@@ -18,11 +18,7 @@ For benchmarking purpose, consider LLVM-MCA after isolation of the relevant piec
 
 ## Kernel
 
-For each complex input sample:
-
-$$
-y[k] = \sum_{a=0}^{3} \mathrm{conj}(h_a[k]) \cdot r_a[k]
-$$
+For each complex input sample $y = \mathbf{h}^{H}\mathbf{r}$ that rewrittes $y = \sum_{k=0}^{3} h_k^* r_k$.
 
 This is typical usecase for LTE-A MIMO receiver. This operation is performed for each RE, that could be (20MHz, FDD Transmission Scheme), 14 OFDM symbols, 1200 subcarriers per subframe (1ms), thus 16,800 MRC per ms, ~17e6 MRC per second. Definitely a candidate for massively repeated execution on a DSP.
 
@@ -45,49 +41,42 @@ Consider for reference the build arguments:
 Naive Implementation aka Scalar
 ```text
 -O3 -std=c++17 -mcpu=neoverse-v2 -fno-vectorize -fno-slp-vectorize
-
 ```
 
 SIMD (automatically enabled by compiler)
 ```text
 -O3 -std=c++17 -mcpu=neoverse-v2
-
 ```
 
 Explicit NEON
 ```text
 -O3 -std=c++17 -mcpu=neoverse-v2
-
 ```
 
 SVE
 ```text
 -O3 -std=c++17 -mcpu=neoverse-v2 -msve-vector-bits=128
-
 ```
 
 SVE (FCMLA)
 ```text
 -O3 -std=c++17 -mcpu=neoverse-v2 -msve-vector-bits=128
-
 ```
 
 SME
 ```text
 -O3 -std=c++17 -mcpu=neoverse-v2+sme
-
 ```
 
 Special case for LLVM-MCA arguments:
 SME
 ```text
 -mcpu=neoverse-v2 -mattr=+sme -timeline
-
 ```
 
 ### SIMD in a Nutshell
 
-A first attempt was made leaving the complete variable-size MRC loop. However, the compiler-generated code contained both a vectorized main loop and a scalar remainder loop. Then LLVM-MCA analyzed both paths as part of the same code region. This made direct comparison misleading: the reported instruction count, total cycles and block throughput did not represent the same amount of useful work between the scalar and SIMD implementations. The benchmark was therefore reduced to a fixed block of 4 complex samples to match the width of a 128-bit NEON vector (`4 × float32`).
+A first attempt was made leaving the complete variable-size MRC loop. However, the compiler-generated code contained both a vectorized main loop and a scalar remainder loop. Then LLVM-MCA analyzed both paths as part of the same code region. This made direct comparison misleading: the reported instruction count, total cycles and block throughput did not represent the same amount of useful work between the scalar and SIMD implementations. The benchmark was therefore reduced to a fixed block of 4 complex samples to match the width of a 128-bit NEON vector (`4 x float32`).
 
 ### NEON in a Nutshell
 
@@ -117,17 +106,13 @@ algorithm into a matrix representation.
 Performance outcome
 | Metric | v1 Scalar | v2 Auto-SIMD | v3 NEON | v4 SVE | v4.1 SVE FCMLA | v5 SME* |
 |---|---:|---:|---:|---:|---:|---:|
-| Instructions / MCA region | 134 | 75 | 26 | 45 | 29 | 37 |
-| µOps / MCA region | 170 | 93 | 55 | 123 | 47 | 39 |
+| Instructions | 134 | 75 | 26 | 45 | 29 | 37 |
 | Block Throughput (cycles) | 28.3 | 16.0 | 9.2 | 20.5 | 7.8 | 6.5 |
-| Speedup vs Scalar | 1.00× | 1.77× | 3.08× | 1.38× | 3.63× | N/A* |
+| Speedup vs Scalar | 1.00x | 1.77x | 3.08x | 1.38x | 3.63x | 4.35x |
 
 \* v5 uses a hypothetical Neoverse V2 + SME LLVM-MCA configuration.
 The Streaming Vector Length is not established as 128 bits by this experiment, so the MCA region cannot be normalized to exactly four complex samples.
 The reported 6.5-cycle Block Throughput is therefore retained as a raw LLVM-MCA result only.
-
-TODO: Provide script for PUE, ED, based on log
-
 
 ## Going More into the Details (Inside the Pipeline)
 
@@ -197,7 +182,7 @@ xychart-beta
 xychart-beta
     title "Cycles/sample"
     x-axis ["Scalar", "Auto-SIMD", "NEON", "SVE", "SVE FCMLA", "SME*"]
-    y-axis "Cycles" 0 --> 30
+    y-axis "Cycles" 0 --> 10
     bar [7.08, 4.00, 2.30, 5.12, 1.95, 1.62]
 ```
 
@@ -345,14 +330,14 @@ The raw modeled looks good, but it is not directly work-normalized against v3 be
 
 | | v1 Scalar | v2 Auto-SIMD | v3 NEON | v4 SVE Auto-FMA | v4.1 SVE FCMLA | v5 SME* |
 |---|---|---|---|---|---|---|
-| Data parallelism | 1 × FP32 | 4 × FP32 | 4 × FP32 | 4 × FP32 SVE | SVE complex pairs | Streaming SVE complex pairs |
+| Data parallelism | 1 x FP32 | 4 x FP32 | 4 x FP32 | 4 x FP32 SVE | SVE complex pairs | Streaming SVE complex pairs |
 | Arithmetic | Scalar FP | Vector FP | NEON FMA | SVE FMA | SVE `FCMLA` | Streaming `FCMLA` |
 | Data access | Scalar loads | Vector loads | `ld2` / `st2` | Gather / scatter | Contiguous vector loads | Streaming vector loads |
 | Data rearrangement | Minimal | `trn1` / `trn2` | Structured load/store | Gather / scatter | Native interleaved complex representation | Native interleaved complex representation |
 | Main limitation | Scalar execution | Shuffle overhead | FMA dependency chains | Gather/scatter overhead | FCMLA dependency chains | Model / SVL comparability |
 | Block RThroughput | 28.3 | 16.0 | 9.2 | 20.5 | 7.8 | 6.5* |
-| Cycles / sample | 7.08 | 4.00 | 2.30 | 5.13 | 1.95 | N/A* |
-| Relative speedup | 1.00× | 1.77× | 3.08× | 1.38× | 3.63× | N/A* |
+| Cycles / sample | 7.08 | 4.00 | 2.30 | 5.13 | 1.95 | 1.63* |
+| Relative speedup | 1.00x | 1.77x | 3.08x | 1.38x | 3.63x | 4.35x* |
 
 \* SME is modeled by enabling SME on the Neoverse V2 LLVM-MCA scheduling model. Since Neoverse V2 does not implement SME, then v5 is a tentative ISA modeling experiment. Direct comparison in the benchmark is slightly speculative.
 
