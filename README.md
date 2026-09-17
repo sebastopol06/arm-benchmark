@@ -110,10 +110,6 @@ Performance outcome
 | Block Throughput (cycles) | 28.3 | 16.0 | 9.2 | 20.5 | 7.8 | 6.5* |
 | Speedup vs Scalar | 1.00x | 1.77x | 3.08x | 1.38x | 3.63x | 4.35x* |
 
-\* v5 uses a hypothetical Neoverse V2 + SME LLVM-MCA configuration.
-The Streaming Vector Length is not established as 128 bits by this experiment, so the MCA region cannot be normalized to exactly four complex samples.
-The reported 6.5-cycle Block Throughput is therefore retained as a raw LLVM-MCA result only.
-
 ## Going More into the Details (Inside the Pipeline)
 
 LLVM-MCA timeline helps in going beyond the above averaged metrics. See v*.log and consider notations:
@@ -127,7 +123,7 @@ LLVM-MCA timeline helps in going beyond the above averaged metrics. See v*.log a
 ```
 
 As per the timeline view, define the average wait times:
- - [0]: Executions
+ - \[0\]: Executions
  - [1]: Average time spent waiting in a scheduler's queue
  - [2]: Average time spent waiting in a scheduler's queue while ready
  - [3]: Average time elapsed from WB until retire stage
@@ -204,7 +200,7 @@ Auto-SIMD
 DeeeeeeE---------------R  ldp q3, q4, [x0]
 ```
 
-Yet same execution latency (6 cycles), v2 deals has some retirement penalty but deals with 128-bit vector registers, that is 4x more data per instruction. There is an increase in parallelism with no significant penalty in instruction latency.
+Yet same execution latency (6 cycles), v2 exhibits some retirement penalty but deals with 128-bit vector registers, that is 4x more data per instruction. There is an increase in parallelism with no significant penalty in instruction latency.
 
 #### 2. Scalar Dependencies
 
